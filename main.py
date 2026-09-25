@@ -6,13 +6,14 @@ from openai import OpenAI
 from dotenv import load_dotenv
 
 from database import get_connection, create_database
+from import_consolidated_data import import_data
 
 
 load_dotenv()
 
 app = FastAPI(
     title="ATF Assistant Backend",
-    version="1.4.0",
+    version="1.5.0",
 )
 
 
@@ -23,6 +24,7 @@ class AssistantRequest(BaseModel):
 @app.on_event("startup")
 def startup():
     create_database()
+    import_data()
 
 
 @app.get("/")
@@ -30,7 +32,7 @@ def root():
     return {
         "status": "ok",
         "service": "ATF Assistant Backend",
-        "version": "1.4.0",
+        "version": "1.5.0",
         "database": "connected",
     }
 
@@ -80,6 +82,118 @@ def get_vehicles():
             "vehicles": [dict(row) for row in rows],
         }
 
+    finally:
+        connection.close()
+
+
+@app.get("/api/atf-catalog")
+def get_atf_catalog(
+    brand: str | None = None,
+    model: str | None = None,
+    pending_only: bool = False,
+):
+    connection = get_connection()
+    try:
+        where = []
+        params = []
+        if brand:
+            where.append("LOWER(tr.brand) = LOWER(?)")
+            params.append(brand)
+        if model:
+            where.append("LOWER(tr.model) LIKE LOWER(?)")
+            params.append(f"%{model}%")
+        if pending_only:
+            where.append("cad.validation_status = 'PENDING_REVIEW'")
+        clause = f"WHERE {' AND '.join(where)}" if where else ""
+        rows = connection.execute(
+            f"""
+            SELECT
+              tr.id, tr.brand, tr.model, tr.engine, tr.year_from,
+              COALESCE(tr.year_to, tr.year_to_label) AS year_to,
+              tr.transmission_type, tr.transmission_code,
+              tr.reference_liters, tr.oem_specification,
+              tr.suggested_product,
+              wr.vehicle_description AS workshop_vehicle,
+              wr.liters_used AS workshop_liters,
+              wr.atf_used AS workshop_atf,
+              wr.filter_1, wr.filter_2, wr.notes AS workshop_notes,
+              wr.original_status AS workshop_status,
+              cad.match_confidence, cad.review_reason,
+              cad.validation_status
+            FROM technical_reference_records tr
+            JOIN consolidated_atf_data cad
+              ON cad.technical_reference_id = tr.id
+            LEFT JOIN workshop_records wr
+              ON wr.id = cad.workshop_record_id
+            {clause}
+            ORDER BY tr.brand, tr.model, tr.year_from, tr.engine
+            """,
+            params,
+        ).fetchall()
+        return {"status": "ok", "count": len(rows), "vehicles": [dict(row) for row in rows]}
+    finally:
+        connection.close()
+
+
+@app.get("/api/atf-catalog/{record_id}")
+def get_atf_catalog_record(record_id: int):
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              tr.id, tr.brand, tr.model, tr.engine, tr.year_from,
+              COALESCE(tr.year_to, tr.year_to_label) AS year_to,
+              tr.transmission_type, tr.transmission_code,
+              tr.reference_liters, tr.oem_specification,
+              tr.suggested_product,
+              wr.vehicle_description AS workshop_vehicle,
+              wr.liters_used AS workshop_liters,
+              wr.atf_used AS workshop_atf,
+              wr.filter_1, wr.filter_2, wr.notes AS workshop_notes,
+              wr.original_status AS workshop_status,
+              cad.match_confidence, cad.review_reason,
+              cad.validation_status
+            FROM technical_reference_records tr
+            JOIN consolidated_atf_data cad
+              ON cad.technical_reference_id = tr.id
+            LEFT JOIN workshop_records wr
+              ON wr.id = cad.workshop_record_id
+            WHERE tr.id = ?
+            """,
+            (record_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Registro ATF no encontrado")
+        result = dict(row)
+        result["recommended_service_liters"] = result.get("workshop_liters") or result.get("reference_liters")
+        result["service_liters_source"] = "WORKSHOP" if result.get("workshop_liters") is not None else "REFERENCE"
+        result["safety_notice"] = (
+            "Dato pendiente de revisión técnica. Confirmar código físico de caja y especificación OEM antes del servicio."
+            if result.get("validation_status") == "PENDING_REVIEW"
+            else "Dato respaldado por experiencia registrada del taller. Confirmar nivel final según procedimiento técnico."
+        )
+        return {"status": "ok", "vehicle": result}
+    finally:
+        connection.close()
+
+
+@app.get("/api/atf-stats")
+def get_atf_stats():
+    connection = get_connection()
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM workshop_records) AS workshop_records,
+              (SELECT COUNT(*) FROM technical_reference_records) AS technical_references,
+              SUM(CASE WHEN workshop_record_id IS NOT NULL THEN 1 ELSE 0 END) AS linked_references,
+              SUM(CASE WHEN validation_status = 'PENDING_REVIEW' THEN 1 ELSE 0 END) AS pending_review,
+              SUM(CASE WHEN validation_status = 'WORKSHOP_CONFIRMED' THEN 1 ELSE 0 END) AS workshop_confirmed
+            FROM consolidated_atf_data
+            """
+        ).fetchone()
+        return {"status": "ok", "stats": dict(row)}
     finally:
         connection.close()
 

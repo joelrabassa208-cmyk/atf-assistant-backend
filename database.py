@@ -93,9 +93,56 @@ def create_database():
       vin TEXT NOT NULL UNIQUE, is_demo INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(vehicle_variant_id) REFERENCES vehicle_variants(id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS workshop_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_row INTEGER NOT NULL UNIQUE,
+      legacy_id TEXT,
+      vehicle_description TEXT NOT NULL,
+      liters_used REAL,
+      atf_used TEXT,
+      filter_1 TEXT,
+      filter_2 TEXT,
+      notes TEXT,
+      original_status TEXT,
+      nishimoto_price REAL,
+      liqui_moly_price REAL,
+      motul_price REAL,
+      valvoline_price REAL,
+      mannol_price REAL,
+      imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS technical_reference_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_row INTEGER NOT NULL UNIQUE,
+      brand TEXT NOT NULL,
+      model TEXT NOT NULL,
+      engine TEXT,
+      year_from INTEGER,
+      year_to INTEGER,
+      year_to_label TEXT,
+      transmission_type TEXT,
+      transmission_code TEXT,
+      reference_liters REAL,
+      oem_specification TEXT,
+      suggested_product TEXT,
+      imported_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS consolidated_atf_data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      technical_reference_id INTEGER NOT NULL UNIQUE,
+      workshop_record_id INTEGER,
+      match_confidence TEXT NOT NULL DEFAULT 'SIN_COINCIDENCIA',
+      review_reason TEXT,
+      validation_status TEXT NOT NULL DEFAULT 'PENDING_REVIEW',
+      FOREIGN KEY(technical_reference_id) REFERENCES technical_reference_records(id) ON DELETE CASCADE,
+      FOREIGN KEY(workshop_record_id) REFERENCES workshop_records(id) ON DELETE SET NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_models_brand ON models(brand_id);
     CREATE INDEX IF NOT EXISTS idx_variants_model ON vehicle_variants(model_id);
     CREATE INDEX IF NOT EXISTS idx_vins_vin ON vins(vin);
+    CREATE INDEX IF NOT EXISTS idx_workshop_vehicle ON workshop_records(vehicle_description);
+    CREATE INDEX IF NOT EXISTS idx_reference_vehicle ON technical_reference_records(brand,model,engine);
+    CREATE INDEX IF NOT EXISTS idx_consolidated_status ON consolidated_atf_data(validation_status);
     """)
     con.commit()
     con.close()
