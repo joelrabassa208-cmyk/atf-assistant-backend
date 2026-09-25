@@ -12,7 +12,7 @@ load_dotenv()
 
 app = FastAPI(
     title="ATF Assistant Backend",
-    version="1.1.0",
+    version="1.3.0",
 )
 
 
@@ -30,7 +30,7 @@ def root():
     return {
         "status": "ok",
         "service": "ATF Assistant Backend",
-        "version": "1.1.0",
+        "version": "1.3.0",
         "database": "connected",
     }
 
