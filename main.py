@@ -5,12 +5,14 @@ from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 
+from database import get_connection, create_database
+
 
 load_dotenv()
 
 app = FastAPI(
     title="ATF Assistant Backend",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -18,12 +20,165 @@ class AssistantRequest(BaseModel):
     message: str
 
 
+@app.on_event("startup")
+def startup():
+    create_database()
+
+
 @app.get("/")
 def root():
     return {
         "status": "ok",
         "service": "ATF Assistant Backend",
+        "version": "1.1.0",
+        "database": "connected",
     }
+
+
+@app.get("/api/vehicles")
+def get_vehicles():
+    connection = get_connection()
+
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                v.id,
+                b.name AS brand,
+                m.name AS model,
+                v.year_from,
+                v.year_to,
+                v.version,
+                v.engine,
+                v.fuel,
+                v.drivetrain,
+                t.manufacturer AS transmission_manufacturer,
+                t.code AS transmission_code,
+                t.type AS transmission_type,
+                t.gears,
+                vt.validation_status
+            FROM vehicle_variants v
+            JOIN models m
+                ON m.id = v.model_id
+            JOIN brands b
+                ON b.id = m.brand_id
+            LEFT JOIN vehicle_transmissions vt
+                ON vt.vehicle_variant_id = v.id
+            LEFT JOIN transmissions t
+                ON t.id = vt.transmission_id
+            ORDER BY
+                b.name,
+                m.name,
+                v.year_from,
+                v.version
+            """
+        ).fetchall()
+
+        return {
+            "status": "ok",
+            "count": len(rows),
+            "vehicles": [dict(row) for row in rows],
+        }
+
+    finally:
+        connection.close()
+
+
+@app.get("/api/vehicles/{vehicle_id}")
+def get_vehicle(vehicle_id: int):
+    connection = get_connection()
+
+    try:
+        vehicle = connection.execute(
+            """
+            SELECT
+                v.id,
+                b.name AS brand,
+                m.name AS model,
+                v.market,
+                v.year_from,
+                v.year_to,
+                v.version,
+                v.engine,
+                v.fuel,
+                v.drivetrain,
+                v.notes AS vehicle_notes,
+                t.manufacturer AS transmission_manufacturer,
+                t.code AS transmission_code,
+                t.type AS transmission_type,
+                t.gears,
+                vt.id AS vehicle_transmission_id,
+                vt.validation_status AS transmission_validation_status,
+                vt.notes AS transmission_notes
+            FROM vehicle_variants v
+            JOIN models m
+                ON m.id = v.model_id
+            JOIN brands b
+                ON b.id = m.brand_id
+            LEFT JOIN vehicle_transmissions vt
+                ON vt.vehicle_variant_id = v.id
+            LEFT JOIN transmissions t
+                ON t.id = vt.transmission_id
+            WHERE v.id = ?
+            """,
+            (vehicle_id,),
+        ).fetchone()
+
+        if vehicle is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Vehículo no encontrado",
+            )
+
+        result = dict(vehicle)
+
+        vehicle_transmission_id = result.get("vehicle_transmission_id")
+        fluid_data = None
+
+        if vehicle_transmission_id is not None:
+            fluid = connection.execute(
+                """
+                SELECT
+                    f.manufacturer AS fluid_manufacturer,
+                    f.name AS fluid_name,
+                    COALESCE(tfd.specification, f.specification)
+                        AS specification,
+                    tfd.total_capacity_l,
+                    tfd.service_capacity_l,
+                    tfd.level_check_method,
+                    tfd.validation_status,
+                    s.publisher AS source_publisher,
+                    s.title AS source_title,
+                    s.document_year AS source_year,
+                    s.url AS source_url,
+                    tfd.notes
+                FROM transmission_fluid_data tfd
+                LEFT JOIN fluids f
+                    ON f.id = tfd.fluid_id
+                LEFT JOIN sources s
+                    ON s.id = tfd.source_id
+                WHERE tfd.vehicle_transmission_id = ?
+                ORDER BY tfd.id DESC
+                LIMIT 1
+                """,
+                (vehicle_transmission_id,),
+            ).fetchone()
+
+            if fluid is not None:
+                fluid_data = dict(fluid)
+
+        result["fluid_data"] = fluid_data
+        result["technical_data_status"] = (
+            "AVAILABLE" if fluid_data is not None else "PENDING_REVIEW"
+        )
+
+        return {
+            "status": "ok",
+            "vehicle": result,
+        }
+
+    finally:
+        connection.close()
 
 
 @app.post("/atf-assistant")
