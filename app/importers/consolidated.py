@@ -1,11 +1,10 @@
+"""Importa las planillas de data/ (taller real + referencia técnica) y las vincula."""
 import re
 import unicodedata
-from pathlib import Path
 
-from database import create_database, get_connection
+from app.config import BASE_DIR
+from app.db.database import Database
 
-
-BASE_DIR = Path(__file__).resolve().parent
 WORKSHOP_FILE = BASE_DIR / "data" / "taller_real.md"
 REFERENCE_FILE = BASE_DIR / "data" / "referencia_tecnica.md"
 
@@ -226,109 +225,115 @@ def choose_match(reference, workshop_rows, sibling_models=()):
     return best, confidence, "; ".join(reasons)
 
 
-def import_data():
-    create_database()
+WORKSHOP_UPSERT = """
+    INSERT INTO workshop_records (
+      source_row, legacy_id, vehicle_description, liters_used, atf_used,
+      filter_1, filter_2, notes, original_status, nishimoto_price,
+      liqui_moly_price, motul_price, valvoline_price, mannol_price
+    ) VALUES (
+      :source_row, :legacy_id, :vehicle, :liters, :atf, :filter_1, :filter_2, :notes,
+      :status, :nishimoto_price, :liqui_moly_price, :motul_price, :valvoline_price,
+      :mannol_price
+    )
+    ON CONFLICT(source_row) DO UPDATE SET
+      legacy_id=excluded.legacy_id,
+      vehicle_description=excluded.vehicle_description,
+      liters_used=excluded.liters_used,
+      atf_used=excluded.atf_used,
+      filter_1=excluded.filter_1,
+      filter_2=excluded.filter_2,
+      notes=excluded.notes,
+      original_status=excluded.original_status,
+      nishimoto_price=excluded.nishimoto_price,
+      liqui_moly_price=excluded.liqui_moly_price,
+      motul_price=excluded.motul_price,
+      valvoline_price=excluded.valvoline_price,
+      mannol_price=excluded.mannol_price
+"""
+
+REFERENCE_UPSERT = """
+    INSERT INTO technical_reference_records (
+      source_row, brand, model, engine, year_from, year_to, year_to_label,
+      transmission_type, transmission_code, reference_liters,
+      oem_specification, suggested_product
+    ) VALUES (
+      :source_row, :brand, :model, :engine, :year_from, :year_to, :year_to_label,
+      :transmission_type, :transmission_code, :reference_liters,
+      :oem_specification, :suggested_product
+    )
+    ON CONFLICT(source_row) DO UPDATE SET
+      brand=excluded.brand, model=excluded.model, engine=excluded.engine,
+      year_from=excluded.year_from, year_to=excluded.year_to,
+      year_to_label=excluded.year_to_label,
+      transmission_type=excluded.transmission_type,
+      transmission_code=excluded.transmission_code,
+      reference_liters=excluded.reference_liters,
+      oem_specification=excluded.oem_specification,
+      suggested_product=excluded.suggested_product
+"""
+
+# Las revisiones manuales (reviewed_at no nulo) no se pisan.
+CONSOLIDATED_UPSERT = """
+    INSERT INTO consolidated_atf_data (
+      technical_reference_id, workshop_record_id, match_confidence,
+      review_reason, validation_status
+    ) VALUES (:technical_id, :workshop_id, :confidence, :reason, :validation)
+    ON CONFLICT(technical_reference_id) DO UPDATE SET
+      workshop_record_id=excluded.workshop_record_id,
+      match_confidence=excluded.match_confidence,
+      review_reason=excluded.review_reason,
+      validation_status=excluded.validation_status
+    WHERE consolidated_atf_data.reviewed_at IS NULL
+"""
+
+
+def _delete_missing(db: Database, table: str, keep: set[int]):
+    """Borra filas que ya no existen en la planilla."""
+    for row in db.all(f"SELECT id, source_row FROM {table}"):
+        if row["source_row"] not in keep:
+            db.execute(f"DELETE FROM {table} WHERE id = :id", {"id": row["id"]})
+
+
+def import_data(db: Database):
     workshop_rows = load_workshop()
     reference_rows = load_reference()
     siblings = {}
     for row in reference_rows:
         siblings.setdefault(normalize(row["brand"]), set()).add(frozenset(words(row["model"])))
-    connection = get_connection()
-    try:
-        # Borra filas que ya no existen en las planillas (antes quedaban huérfanas).
-        connection.execute(
-            f"DELETE FROM workshop_records WHERE source_row NOT IN ({','.join('?' * len(workshop_rows)) or 'NULL'})",
-            [row["source_row"] for row in workshop_rows],
-        )
-        connection.execute(
-            f"DELETE FROM technical_reference_records WHERE source_row NOT IN ({','.join('?' * len(reference_rows)) or 'NULL'})",
-            [row["source_row"] for row in reference_rows],
-        )
-        for row in workshop_rows:
-            connection.execute(
-                """
-                INSERT INTO workshop_records (
-                  source_row, legacy_id, vehicle_description, liters_used, atf_used,
-                  filter_1, filter_2, notes, original_status, nishimoto_price,
-                  liqui_moly_price, motul_price, valvoline_price, mannol_price
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(source_row) DO UPDATE SET
-                  legacy_id=excluded.legacy_id,
-                  vehicle_description=excluded.vehicle_description,
-                  liters_used=excluded.liters_used,
-                  atf_used=excluded.atf_used,
-                  filter_1=excluded.filter_1,
-                  filter_2=excluded.filter_2,
-                  notes=excluded.notes,
-                  original_status=excluded.original_status,
-                  nishimoto_price=excluded.nishimoto_price,
-                  liqui_moly_price=excluded.liqui_moly_price,
-                  motul_price=excluded.motul_price,
-                  valvoline_price=excluded.valvoline_price,
-                  mannol_price=excluded.mannol_price
-                """,
-                (
-                    row["source_row"], row["legacy_id"], row["vehicle"], row["liters"], row["atf"],
-                    row["filter_1"], row["filter_2"], row["notes"], row["status"], row["nishimoto_price"],
-                    row["liqui_moly_price"], row["motul_price"], row["valvoline_price"], row["mannol_price"],
-                ),
-            )
-        for row in reference_rows:
-            connection.execute(
-                """
-                INSERT INTO technical_reference_records (
-                  source_row, brand, model, engine, year_from, year_to, year_to_label,
-                  transmission_type, transmission_code, reference_liters,
-                  oem_specification, suggested_product
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(source_row) DO UPDATE SET
-                  brand=excluded.brand, model=excluded.model, engine=excluded.engine,
-                  year_from=excluded.year_from, year_to=excluded.year_to,
-                  year_to_label=excluded.year_to_label,
-                  transmission_type=excluded.transmission_type,
-                  transmission_code=excluded.transmission_code,
-                  reference_liters=excluded.reference_liters,
-                  oem_specification=excluded.oem_specification,
-                  suggested_product=excluded.suggested_product
-                """,
-                (
-                    row["source_row"], row["brand"], row["model"], row["engine"], row["year_from"],
-                    row["year_to"], row["year_to_label"], row["transmission_type"], row["transmission_code"],
-                    row["reference_liters"], row["oem_specification"], row["suggested_product"],
-                ),
-            )
-            technical_id = connection.execute(
-                "SELECT id FROM technical_reference_records WHERE source_row=?", (row["source_row"],)
-            ).fetchone()["id"]
-            best, confidence, reason = choose_match(row, workshop_rows, siblings[normalize(row["brand"])])
-            workshop_id = None
-            if best:
-                workshop_id = connection.execute(
-                    "SELECT id FROM workshop_records WHERE source_row=?", (best["source_row"],)
-                ).fetchone()["id"]
-            validation = "WORKSHOP_CONFIRMED" if best and confidence == "ALTA" and not reason else "PENDING_REVIEW"
-            connection.execute(
-                """
-                INSERT INTO consolidated_atf_data (
-                  technical_reference_id, workshop_record_id, match_confidence,
-                  review_reason, validation_status
-                ) VALUES (?,?,?,?,?)
-                ON CONFLICT(technical_reference_id) DO UPDATE SET
-                  workshop_record_id=excluded.workshop_record_id,
-                  match_confidence=excluded.match_confidence,
-                  review_reason=excluded.review_reason,
-                  validation_status=excluded.validation_status
-                WHERE consolidated_atf_data.reviewed_at IS NULL
-                """,
-                (technical_id, workshop_id, confidence, reason, validation),
-            )
-        connection.commit()
-        return {"workshop": len(workshop_rows), "reference": len(reference_rows)}
-    finally:
-        connection.close()
+
+    _delete_missing(db, "workshop_records", {row["source_row"] for row in workshop_rows})
+    _delete_missing(db, "technical_reference_records", {row["source_row"] for row in reference_rows})
+
+    for row in workshop_rows:
+        db.execute(WORKSHOP_UPSERT, {k: row[k] for k in (
+            "source_row", "legacy_id", "vehicle", "liters", "atf", "filter_1", "filter_2",
+            "notes", "status", "nishimoto_price", "liqui_moly_price", "motul_price",
+            "valvoline_price", "mannol_price")})
+    workshop_ids = {
+        row["source_row"]: row["id"]
+        for row in db.all("SELECT id, source_row FROM workshop_records")
+    }
+
+    for row in reference_rows:
+        db.execute(REFERENCE_UPSERT, row)
+        technical_id = db.one(
+            "SELECT id FROM technical_reference_records WHERE source_row = :source_row",
+            {"source_row": row["source_row"]},
+        )["id"]
+        best, confidence, reason = choose_match(row, workshop_rows, siblings[normalize(row["brand"])])
+        workshop_id = workshop_ids[best["source_row"]] if best else None
+        validation = "WORKSHOP_CONFIRMED" if best and confidence == "ALTA" and not reason else "PENDING_REVIEW"
+        db.execute(CONSOLIDATED_UPSERT, {
+            "technical_id": technical_id, "workshop_id": workshop_id,
+            "confidence": confidence, "reason": reason, "validation": validation,
+        })
+    return {"workshop": len(workshop_rows), "reference": len(reference_rows)}
 
 
 if __name__ == "__main__":
-    counts = import_data()
+    from app.db.database import session
+
+    with session() as database:
+        counts = import_data(database)
     print(f"Registros del taller: {counts['workshop']}")
     print(f"Referencias técnicas: {counts['reference']}")

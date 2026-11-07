@@ -1,7 +1,8 @@
 import sqlite3
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+# Scripts históricos (v1.3/v1.4): solo funcionan sobre el SQLite local.
+BASE_DIR = Path(__file__).resolve().parents[2]
 DATABASE_PATH = BASE_DIR / "atf_assistant.db"
 
 def get_connection():
