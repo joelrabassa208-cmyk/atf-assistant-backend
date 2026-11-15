@@ -144,8 +144,28 @@ def create_database():
     CREATE INDEX IF NOT EXISTS idx_reference_vehicle ON technical_reference_records(brand,model,engine);
     CREATE INDEX IF NOT EXISTS idx_consolidated_status ON consolidated_atf_data(validation_status);
     """)
+    migrate(con)
     con.commit()
     con.close()
+
+
+# Columnas agregadas después de la v1.5. CREATE TABLE IF NOT EXISTS no las crea
+# en bases existentes, así que se agregan acá si faltan.
+MIGRATIONS = {
+    "consolidated_atf_data": {
+        "reviewed_at": "DATETIME",
+        "reviewed_by": "TEXT",
+        "review_notes": "TEXT",
+    },
+}
+
+
+def migrate(con):
+    for table, columns in MIGRATIONS.items():
+        existing = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        for name, kind in columns.items():
+            if name not in existing:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
 if __name__ == "__main__":
     create_database()

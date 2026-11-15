@@ -90,34 +90,121 @@ def load_reference():
     return result
 
 
-def match_score(reference, workshop):
-    description = normalize(workshop["vehicle"])
-    brand = normalize(reference["brand"])
-    model = normalize(reference["model"])
-    if not brand or not model or brand not in description:
+GENERIC_CODES = {"", "AT", "CVT", "6AT", "8AT", "DCT", "ECVT", "DSG"}
+
+DCT_WORDS = {"DSG", "DCT", "STRONIC", "S", "POWERSHIFT", "EDC", "DPS6"}
+CVT_WORDS = {"CVT", "ECVT", "MULTITRONIC", "XTRONIC", "LINEARTRONIC"}
+AT_WORDS = {"AT", "TIPTRONIC", "STEPTRONIC", "AL4", "EAT6", "EAT8", "MARCHAS"}
+
+
+def words(value):
+    return set(normalize(value).split())
+
+
+def displacements(value):
+    """Cilindradas tipo 1.4 / 2.0 presentes en el texto (1.4T, 2.0D, etc.)."""
+    return set(re.findall(r"(?<![\d.])([1-6][.,]\d)(?!\d)", value or ""))
+
+
+def gear_count(value):
+    """Cantidad de marchas deducible del texto de la caja, o None."""
+    text = normalize(value)
+    patterns = [
+        r"\b(\d{1,2}) ?(?:AT|HP|G TRONIC|MARCHAS|SPEED)\b",
+        r"\b(\d{1,2})(?:T|F|L|R)\d{2}E?\b",     # 6T40, 6F35, 6L50, 6R80, 10R80
+        r"\b(\d)HP\d{2}",                       # 6HP19, 8HP45
+        r"\bZF ?(\d)(?:HP|H)?",                   # ZF9, ZF8HP, ZF 9H
+        r"\b(?:AT|EAT|AW|ATX) ?(\d{1,2})\b",     # AT6, EAT6
+        r"\bAL(4)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            gears = int(match.group(1))
+            if 3 <= gears <= 10:
+                return gears
+    return None
+
+
+def transmission_family(value):
+    tokens = words(value)
+    text = normalize(value)
+    if tokens & CVT_WORDS:
+        return "CVT"
+    if tokens & DCT_WORDS or re.search(r"\bD[QL]\d{3}\b", text) or "S TRONIC" in text:
+        return "DCT"
+    if tokens & AT_WORDS or gear_count(value) or re.search(r"\b(ZF|AISIN)", text):
+        return "AT"
+    return None
+
+
+BOX_MAKERS = ("ZF", "AISIN", "JATCO", "GETRAG")
+
+
+def box_maker(value):
+    text = normalize(value)
+    found = {maker for maker in BOX_MAKERS if re.search(rf"\b{maker}", text)}
+    return found.pop() if len(found) == 1 else None
+
+
+def match_score(reference, workshop, sibling_models=()):
+    """Puntaje de coincidencia; -1 si hay datos que se contradicen.
+
+    Trabaja con palabras completas (no substrings) y descarta pares cuya
+    cilindrada, tipo de caja o cantidad de marchas no coinciden.
+    """
+    description = workshop["vehicle"]
+    desc_words = words(description)
+    brand_words = words(reference["brand"])
+    model_words = words(reference["model"])
+    if not brand_words or not model_words or not brand_words <= desc_words:
         return -1
-    score = 0
-    if model in description:
-        score += 8
-    else:
-        model_tokens = [token for token in model.split() if len(token) > 1]
-        hits = sum(token in description for token in model_tokens)
-        if not hits:
+    if not model_words <= desc_words:
+        return -1
+    # "C4" no debe tomar un registro de "C4 LOUNGE" si existe ese modelo aparte.
+    for sibling in sibling_models:
+        if model_words < sibling and sibling <= desc_words:
             return -1
-        score += hits * 3
+    score = 8
+
+    reference_box = f"{reference['transmission_type']} {reference['transmission_code']}"
+    ref_disp = displacements(reference["engine"])
+    desc_disp = displacements(description)
+    if ref_disp and desc_disp:
+        if not ref_disp & desc_disp:
+            return -1
+        score += 3
+
+    ref_family = transmission_family(reference_box)
+    desc_family = transmission_family(description)
+    if ref_family and desc_family:
+        if ref_family != desc_family:
+            return -1
+        score += 1
+
+    ref_maker = box_maker(reference_box)
+    desc_maker = box_maker(description)
+    if ref_maker and desc_maker and ref_maker != desc_maker:
+        return -1
+
+    ref_gears = gear_count(reference_box) or gear_count(reference["engine"])
+    desc_gears = gear_count(description)
+    if ref_gears and desc_gears:
+        if ref_gears != desc_gears:
+            return -1
+        score += 2
+
     code = normalize(reference["transmission_code"])
-    if code not in {"", "AT", "CVT", "6AT", "8AT", "DCT"} and code in description:
+    if code not in GENERIC_CODES and code in normalize(description):
         score += 6
-    engine_tokens = [token for token in normalize(reference["engine"]).split() if any(char.isdigit() for char in token)]
-    score += sum(token in description for token in engine_tokens) * 2
-    if "ACTUALIZADO" in workshop["status"].upper():
+    if "ACTUALIZADO" in (workshop["status"] or "").upper():
         score += 1
     return score
 
 
-def choose_match(reference, workshop_rows):
+def choose_match(reference, workshop_rows, sibling_models=()):
     ranked = sorted(
-        ((match_score(reference, row), row) for row in workshop_rows),
+        ((match_score(reference, row, sibling_models), row) for row in workshop_rows),
         key=lambda item: item[0],
         reverse=True,
     )
@@ -126,22 +213,37 @@ def choose_match(reference, workshop_rows):
         return None, "SIN_COINCIDENCIA", "Falta experiencia del taller vinculada"
     best_score, best = ranked[0]
     ambiguous = len(ranked) > 1 and ranked[1][0] == best_score
-    confidence = "REVISAR_COINCIDENCIA" if ambiguous else ("ALTA" if best_score >= 11 else "PROBABLE")
-    reason = "Hay más de una coincidencia posible" if ambiguous else ""
+    # ALTA exige modelo + cilindrada + al menos un dato de caja coincidente.
+    confidence = "REVISAR_COINCIDENCIA" if ambiguous else ("ALTA" if best_score >= 12 else "PROBABLE")
+    reasons = []
+    if ambiguous:
+        reasons.append("Hay más de una coincidencia posible")
     if best["liters"] is not None and reference["reference_liters"] is not None:
         if abs(best["liters"] - reference["reference_liters"]) >= 2:
-            reason = "Diferencia de litros igual o mayor a 2"
-    if normalize(reference["transmission_code"]) in {"AT", "CVT", "6AT", "8AT", "DCT"}:
-        reason = reason or "Código de transmisión genérico"
-    return best, confidence, reason
+            reasons.append("Diferencia de litros igual o mayor a 2")
+    if normalize(reference["transmission_code"]) in GENERIC_CODES:
+        reasons.append("Código de transmisión genérico")
+    return best, confidence, "; ".join(reasons)
 
 
 def import_data():
     create_database()
     workshop_rows = load_workshop()
     reference_rows = load_reference()
+    siblings = {}
+    for row in reference_rows:
+        siblings.setdefault(normalize(row["brand"]), set()).add(frozenset(words(row["model"])))
     connection = get_connection()
     try:
+        # Borra filas que ya no existen en las planillas (antes quedaban huérfanas).
+        connection.execute(
+            f"DELETE FROM workshop_records WHERE source_row NOT IN ({','.join('?' * len(workshop_rows)) or 'NULL'})",
+            [row["source_row"] for row in workshop_rows],
+        )
+        connection.execute(
+            f"DELETE FROM technical_reference_records WHERE source_row NOT IN ({','.join('?' * len(reference_rows)) or 'NULL'})",
+            [row["source_row"] for row in reference_rows],
+        )
         for row in workshop_rows:
             connection.execute(
                 """
@@ -198,7 +300,7 @@ def import_data():
             technical_id = connection.execute(
                 "SELECT id FROM technical_reference_records WHERE source_row=?", (row["source_row"],)
             ).fetchone()["id"]
-            best, confidence, reason = choose_match(row, workshop_rows)
+            best, confidence, reason = choose_match(row, workshop_rows, siblings[normalize(row["brand"])])
             workshop_id = None
             if best:
                 workshop_id = connection.execute(
@@ -216,6 +318,7 @@ def import_data():
                   match_confidence=excluded.match_confidence,
                   review_reason=excluded.review_reason,
                   validation_status=excluded.validation_status
+                WHERE consolidated_atf_data.reviewed_at IS NULL
                 """,
                 (technical_id, workshop_id, confidence, reason, validation),
             )

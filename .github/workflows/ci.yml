@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: atf
+          POSTGRES_PASSWORD: atf
+          POSTGRES_DB: atf_assistant
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+      - name: Tests unitarios
+        run: python -m unittest discover tests -v
+      - name: Preparar Postgres (copia de datos)
+        if: matrix.db == 'postgres'
+        run: |
+          if [ ! -f alembic.ini ]; then echo "Esta versión no soporta Postgres; se omite."; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; fi
+          echo "DATABASE_URL=postgresql://atf:atf@localhost:5432/atf_assistant" >> "$GITHUB_ENV"
+          export DATABASE_URL=postgresql://atf:atf@localhost:5432/atf_assistant
+          alembic upgrade head
+          python scripts/sqlite_to_postgres.py
+      - name: Levantar servidor y probar rutas
+        if: env.SKIP != '1'
+        env:
+          ATF_ADMIN_KEY: clave-ci
+        run: |
+          uvicorn main:app --port 8000 > server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8000/ && break; sleep 1; done
+          set -x
+          curl -sf localhost:8000/ | tee /dev/stderr | grep -q '"database":"connected"'
+          curl -sf localhost:8000/api/atf-stats | tee /dev/stderr | grep -q '"workshop_confirmed":14'
+          curl -sf localhost:8000/api/vehicles | python -c "import sys,json; d=json.load(sys.stdin); assert d['count']>100, d['count']"
+          curl -sf localhost:8000/api/vehicles/1 | grep -q '"technical_data_status"'
+          curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/vehicles/999999 | grep -q 404
+          curl -sf 'localhost:8000/api/atf-catalog?brand=Jeep&model=comp' | python -c "import sys,json; d=json.load(sys.stdin); assert d['count']>0 and all(v['model']=='Compass' for v in d['vehicles'])"
+          ID=$(curl -sf 'localhost:8000/api/atf-catalog?brand=Jeep' | python -c "import sys,json; print(json.load(sys.stdin)['vehicles'][0]['id'])")
+          curl -sf localhost:8000/api/atf-catalog/$ID | grep -q '"safety_notice"'
+          curl -s -o /dev/null -w '%{http_code}' -X PATCH localhost:8000/api/atf-catalog/$ID/review -H 'Content-Type: application/json' -H 'X-Admin-Key: mala' -d '{"validation_status":"REJECTED","reviewed_by":"CI"}' | grep -q 401
+          curl -sf -X PATCH localhost:8000/api/atf-catalog/$ID/review -H 'Content-Type: application/json' -H 'X-Admin-Key: clave-ci' -d '{"validation_status":"REJECTED","reviewed_by":"CI","review_notes":"prueba"}' | grep -q '"REJECTED"'
+          curl -s -o /dev/null -w '%{http_code}' -X POST localhost:8000/atf-assistant -H 'Content-Type: application/json' -d '{"message":"hola"}' | grep -q 500
+          # Reinicio: la revisión manual debe sobrevivir a la reimportación.
+          kill %1; sleep 2
+          uvicorn main:app --port 8000 >> server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8000/ && break; sleep 1; done
+          if [ "${{ matrix.db }}" = postgres ]; then
+            curl -sf localhost:8000/api/atf-catalog/$ID | grep -q '"REJECTED"'
+          fi
+          echo OK
+      - name: Log del servidor
+        if: always()
+        run: cat server.log || true
