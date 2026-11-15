@@ -20,12 +20,27 @@ def run_migrations():
     command.upgrade(Config(str(config.BASE_DIR / "alembic.ini")), "head")
 
 
+def seed_if_empty():
+    """Primer arranque con Postgres: copia los datos del SQLite del repo."""
+    from app.db.database import get_engine
+    from app.db.seed import copy_from_sqlite, is_empty
+
+    sqlite_path = config.BASE_DIR / "atf_assistant.db"
+    if get_engine().dialect.name == "sqlite" or not sqlite_path.exists():
+        return
+    with session() as db:
+        if is_empty(db):
+            counts = copy_from_sqlite(db, sqlite_path)
+            logger.info("Base vacía: datos copiados desde SQLite %s", counts)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     # Con una sola instancia (plan actual de Render) es seguro migrar al arrancar.
     # Con varias instancias, poner RUN_MIGRATIONS=false y migrar en el deploy.
     if os.getenv("RUN_MIGRATIONS", "true").lower() in {"1", "true", "yes"}:
         run_migrations()
+    seed_if_empty()
     if config.IMPORT_ON_STARTUP:
         from app.importers.consolidated import import_data
 

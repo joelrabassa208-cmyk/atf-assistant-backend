@@ -32,16 +32,12 @@ tests/
 
 ## Pasar Render a Postgres (una vez)
 
-1. En Render: **New > PostgreSQL** (región igual al servicio web).
-2. En la PC, con el repo actualizado:
-   ```powershell
-   pip install -r requirements.txt
-   $env:DATABASE_URL="<External Database URL de Render>"
-   alembic upgrade head
-   python scripts/sqlite_to_postgres.py
-   ```
-3. En el servicio web, **Environment**: agregar `DATABASE_URL` con la
-   *Internal Database URL*. Guardar y redeployar.
+1. En Render: **New > PostgreSQL** (misma región que el servicio web).
+2. En el servicio web, **Environment**: agregar `DATABASE_URL` con la
+   *Internal Database URL* de la base. Guardar (redeploya solo).
+3. Al arrancar con la base vacía, el backend crea las tablas y copia solo los
+   datos de `atf_assistant.db`. (`scripts/sqlite_to_postgres.py` queda para
+   hacerlo a mano o rehacerlo con `--force`.)
 4. Verificar `/` (`database: connected`), `/api/atf-stats` y la app.
 
 Desde ese momento las revisiones manuales y cualquier dato nuevo persisten
