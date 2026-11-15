@@ -37,8 +37,7 @@ jobs:
           if [ ! -f alembic.ini ]; then echo "Esta versión no soporta Postgres; se omite."; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; fi
           echo "DATABASE_URL=postgresql://atf:atf@localhost:5432/atf_assistant" >> "$GITHUB_ENV"
           export DATABASE_URL=postgresql://atf:atf@localhost:5432/atf_assistant
-          alembic upgrade head
-          python scripts/sqlite_to_postgres.py
+          # Sin script: el backend copia los datos solo al arrancar con la base vacía.
       - name: Levantar servidor y probar rutas
         if: env.SKIP != '1'
         env:
