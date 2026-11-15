@@ -8,7 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from import_consolidated_data import choose_match, match_score  # noqa: E402
+from app.importers.consolidated import choose_match, match_score  # noqa: E402
 
 
 def ref(brand, model, engine, code, kind="AT", liters=9.0):

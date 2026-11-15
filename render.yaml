@@ -1,0 +1,23 @@
+# Blueprint de Render: servicio web + Postgres administrado.
+# Para un servicio ya existente alcanza con crear la base en Render y
+# agregar DATABASE_URL (Internal Database URL) en Environment.
+services:
+  - type: web
+    name: atf-assistant-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: atf-assistant-db
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ATF_ADMIN_KEY
+        sync: false
+
+databases:
+  - name: atf-assistant-db
+    databaseName: atf_assistant

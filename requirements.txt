@@ -1,4 +1,7 @@
-fastapi
-uvicorn[standard]
-openai
-python-dotenv
+fastapi>=0.110
+uvicorn[standard]>=0.27
+openai>=1.66
+python-dotenv>=1.0
+SQLAlchemy>=2.0,<2.1
+alembic>=1.13
+psycopg[binary]>=3.1
