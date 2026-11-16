@@ -69,6 +69,26 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(detail["technical_data_status"], "AVAILABLE")
         self.assertIsNotNone(detail["fluid_data"]["specification"])
 
+    def test_ficha_con_catalogo(self):
+        cruze = self.db.one(
+            "SELECT v.id FROM vehicle_variants v JOIN models m ON m.id = v.model_id "
+            "WHERE m.name = 'Cruze' AND v.engine = '1.4 Turbo'"
+        )
+        ref = service.get_vehicle(self.db, cruze["id"])["atf_reference"]
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref["transmission_code"], "6T40")
+        self.assertEqual(ref["reference_liters"], 9.0)
+        old = self.db.one(
+            "SELECT v.id FROM vehicle_variants v JOIN models m ON m.id = v.model_id "
+            "WHERE m.name = 'Cruze' AND v.engine = '1.8 16V'"
+        )
+        self.assertEqual(service.get_vehicle(self.db, old["id"])["atf_reference"]["transmission_code"], "6T30")
+        ranger20 = self.db.one(
+            "SELECT v.id FROM vehicle_variants v JOIN models m ON m.id = v.model_id "
+            "WHERE m.name = 'Ranger' AND v.engine = '2.0L Turbo'"
+        )
+        self.assertIsNone(service.get_vehicle(self.db, ranger20["id"])["atf_reference"])
+
     def test_catalogo_y_filtros(self):
         everything = service.list_catalog(self.db)
         self.assertEqual(len(everything), 181)
