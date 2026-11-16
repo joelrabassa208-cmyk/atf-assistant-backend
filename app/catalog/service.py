@@ -126,10 +126,47 @@ def list_vehicles(db: Database):
     return db.all(VEHICLES_SQL)
 
 
+def find_catalog_match(db: Database, vehicle: dict):
+    """Registro del catálogo ATF que corresponde a un vehículo, o None.
+
+    Exige marca y modelo (palabras completas) y, si ambos lo informan, que
+    coincidan la cilindrada y que se superpongan los años.
+    """
+    from app.importers.consolidated import displacements, normalize, words
+
+    brand = normalize(vehicle.get("brand"))
+    model_words = words(vehicle.get("model"))
+    if not brand or not model_words:
+        return None
+    candidates = db.all(
+        "SELECT id, brand, model, engine, year_from, year_to, transmission_code "
+        "FROM technical_reference_records"
+    )
+    vehicle_disp = displacements(vehicle.get("engine") or "")
+    v_from, v_to = vehicle.get("year_from"), vehicle.get("year_to")
+    best, best_score = None, -1
+    for row in candidates:
+        if normalize(row["brand"]) != brand or words(row["model"]) != model_words:
+            continue
+        row_disp = displacements(row["engine"] or "")
+        if vehicle_disp and row_disp and not vehicle_disp & row_disp:
+            continue
+        r_from, r_to = row["year_from"], row["year_to"]
+        if v_from and r_from and (r_to or 9999) < v_from or (v_to and r_from and r_from > v_to):
+            continue
+        score = 2 if vehicle_disp & row_disp else 0
+        if normalize(row["transmission_code"]) == normalize(vehicle.get("transmission_code")):
+            score += 1
+        if score > best_score:
+            best, best_score = row, score
+    return get_catalog_record(db, best["id"]) if best else None
+
+
 def get_vehicle(db: Database, vehicle_id: int):
     vehicle = db.one(VEHICLE_SQL, {"id": vehicle_id})
     if vehicle is None:
         return None
+    vehicle["atf_reference"] = find_catalog_match(db, vehicle)
     fluid = None
     if vehicle.get("vehicle_transmission_id") is not None:
         fluid = db.one(FLUID_SQL, {"vt_id": vehicle["vehicle_transmission_id"]})
